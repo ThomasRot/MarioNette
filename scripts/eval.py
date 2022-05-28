@@ -15,7 +15,6 @@ LOG = logging.getLogger(__name__)
 
 th.backends.cudnn.deterministic = True
 
-
 def _worker_init_fn(_):
     np.random.seed()
 
@@ -32,8 +31,8 @@ def main(args):
     device = "cuda" if th.cuda.is_available() and args.cuda else "cpu"
 
     learned_dict = models.Dictionary(args.num_classes,
-                                     (args.canvas_size // args.layer_size*2,
-                                      args.canvas_size // args.layer_size*2),
+                                     (args.canvas_size//args.layer_size * 2,
+                                      args.canvas_size//args.layer_size * 2),
                                      4, bottleneck_size=args.dim_z)
     learned_dict.to(device)
 

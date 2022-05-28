@@ -5,6 +5,7 @@ import logging
 import torch as th
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
+from rtpt import RTPT
 
 import ttools
 
@@ -85,7 +86,7 @@ def main(args):
             os.path.join(args.checkpoint_dir, "bg"), background,
             optimizers=interface.opt_bg)
 
-    starting_epoch = None
+    starting_epoch = 0
 
     if args.load_model is not None:
         model_checkpointer.try_and_init_from(args.load_model)
@@ -98,8 +99,13 @@ def main(args):
         if background is not None:
             bg_checkpointer.load_latest()
 
+    num_epochs = max(1, args.num_steps * args.bs // len(data))
+    rtpt = RTPT(name_initials='TR', experiment_name='MarioNette', max_iterations=num_epochs - starting_epoch)
+    rtpt.start()
     trainer = ttools.Trainer(interface)
     writer = SummaryWriter(args.checkpoint_dir)
+    LOG.info(f'We are scheduled for {num_epochs} epochs...')
+    trainer.add_callback(callbacks.RTPTCallback(rtpt=rtpt))
 
     keys = ["rec_loss", "psnr", "beta_loss", "probs_loss", "psnr_hard"]
     trainer.add_callback(ttools.callbacks.ProgressBarCallback(keys=keys))
@@ -123,7 +129,7 @@ def main(args):
         writer=writer, val_writer=None, frequency=2000))
 
     trainer.train(dataloader,
-                  num_epochs=max(1, args.num_steps * args.bs // len(data)),
+                  num_epochs=num_epochs,
                   val_dataloader=None, starting_epoch=starting_epoch)
 
 

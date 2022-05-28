@@ -21,14 +21,14 @@ class VizCallback(cb.TensorBoardImageDisplayCallback):
         image = batch['im'].detach()
         image = F.pad(image, (1, 1, 1, 1), value=0)
 
-        out = fwd_data[f"out{self.suffix}"].cpu().detach()[:,:3]
+        out = fwd_data[f"out{self.suffix}"].cpu().detach()[:, :3]
         out = F.pad(out, (1, 1, 1, 1), value=0)
 
         diff = (image-out).abs() * 4
 
         layers = [image, out, diff]
         for i in range(fwd_data[f"layers{self.suffix}"].shape[1]):
-            layer = fwd_data[f"layers{self.suffix}"][:,i].cpu().detach()
+            layer = fwd_data[f"layers{self.suffix}"][:, i].cpu().detach()
             rgb, a = th.split(layer, [3, 1], dim=2)
 
             psz = layer.shape[-1]
@@ -38,7 +38,7 @@ class VizCallback(cb.TensorBoardImageDisplayCallback):
             out = out.flatten(2, 3).flatten(3, 4)
 
             for i in range(4):
-                out = out*(1-a[:,i]) + rgb[:,i]*a[:,i]
+                out = out*(1-a[:, i]) + rgb[:, i]*a[:, i]
             layers.append(F.pad(out, (1, 1, 1, 1), value=0))
 
         viz = th.cat(layers, 3)
@@ -77,3 +77,19 @@ class BackgroundCallback(cb.TensorBoardImageDisplayCallback):
     def visualized_image(self, batch, fwd_data):
         bg = fwd_data['background'].cpu()
         return bg
+
+
+
+class RTPTCallback(cb.Callback):
+    def __init__(self, rtpt, *args, **kwargs):
+        self.rtpt = rtpt
+        super().__init__(*args, **kwargs)
+
+    def epoch_start(self, _):
+        """
+        Hook to execute code when a new epoch starts.
+        """
+        self.rtpt.step()
+
+
+

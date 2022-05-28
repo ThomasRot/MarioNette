@@ -24,11 +24,11 @@ class Dictionary(nn.Module):
 
         self.latent = nn.Parameter(th.randn(num_classes, bottleneck_size))
         self.decode = nn.Sequential(
-            nn.Linear(bottleneck_size, 8*bottleneck_size),
-            nn.GroupNorm(8, 8*bottleneck_size),
+            nn.Linear(bottleneck_size, 8 * bottleneck_size),
+            nn.GroupNorm(8, 8 * bottleneck_size),
             nn.ReLU(inplace=True),
-            nn.Linear(8*bottleneck_size,
-                      num_chans*patch_size[0]*patch_size[1]),
+            nn.Linear(8 * bottleneck_size,
+                      num_chans * patch_size[0] * patch_size[1]),
             nn.Sigmoid()
         )
 
@@ -102,22 +102,28 @@ class Encoder(nn.Module):
 
         self.blocks = nn.ModuleList()
         self.heads = nn.ModuleList()
+
         for i in range(num_ds):
             in_ch = num_channels if i == 0 else dim_z
             self.blocks.append(_DownBlock(in_ch, dim_z, return_mask=True))
 
             for lsize in layer_sizes:
-                if canvas_size // (2**(i+1)) == lsize:
+                if canvas_size // (2 ** (i + 1)) == lsize:
                     self.heads.append(PartialConv2d(
                         dim_z, dim_z, 3, padding=1))
 
     def forward(self, x):
         out = [None] * len(self.layer_sizes)
 
+        # [8, 3, 128, 128], [1024, 7, 32, 32]
         y = x
         mask = None
+        # print(f'Pre-Block{y.shape=}')
+
         for _block in self.blocks:
+            # [=, 128, /2, / 2]
             y, mask = _block(y, mask)  # encoding + downsampling step
+            # print(f'{y.shape=}, {mask.shape=}')
 
             # Look for layers whose spatial dimension match the current block
             for i, l in enumerate(self.layer_sizes):
@@ -133,6 +139,7 @@ class Encoder(nn.Module):
             if o is None:
                 raise RuntimeError("Unexpected output count for Encoder.")
 
+        # N * [B, layer_size (LZ), LZ, Channels]
         return out
 
 
@@ -153,7 +160,7 @@ class Model(nn.Module):
         self.spatial_transformer_bg = spatial_transformer_bg
         self.straight_through_probs = straight_through_probs
 
-        self.im_encoder = Encoder(3, canvas_size, [layer_size]*num_layers,
+        self.im_encoder = Encoder(3, canvas_size, [layer_size] * num_layers,
                                   dim_z, no_layernorm=no_layernorm)
 
         self.project = nn.Sequential(
@@ -162,7 +169,7 @@ class Model(nn.Module):
             else nn.Identity()
         )
 
-        self.encoder_xform = Encoder(7, self.patch_size*2, [1], dim_z,
+        self.encoder_xform = Encoder(7, self.patch_size * 2, [1], dim_z,
                                      no_layernorm=no_layernorm)
         self.probs = nn.Sequential(
             nn.Linear(dim_z, dim_z),
@@ -177,14 +184,14 @@ class Model(nn.Module):
                 nn.Linear(dim_z, dim_z),
                 nn.GroupNorm(8, dim_z),
                 nn.LeakyReLU(),
-                nn.Linear(dim_z, self.patch_size+1),
+                nn.Linear(dim_z, self.patch_size + 1),
                 nn.Softmax(dim=-1)
             )
             self.xforms_y = nn.Sequential(
                 nn.Linear(dim_z, dim_z),
                 nn.GroupNorm(8, dim_z),
                 nn.LeakyReLU(),
-                nn.Linear(dim_z, self.patch_size+1),
+                nn.Linear(dim_z, self.patch_size + 1),
                 nn.Softmax(dim=-1)
             )
         else:
@@ -214,7 +221,7 @@ class Model(nn.Module):
                     nn.Linear(dim_z, dim_z),
                     nn.GroupNorm(8, dim_z),
                     nn.LeakyReLU(),
-                    nn.Linear(dim_z, 3*canvas_size + 1),
+                    nn.Linear(dim_z, 3 * canvas_size + 1),
                     nn.Softmax(dim=-1)
                 )
         else:
@@ -229,32 +236,50 @@ class Model(nn.Module):
             learned_dict = learned_dict[rng]
             dict_codes = dict_codes[rng]
 
+        # [B, Number of Layers (NL), LZ, LZ, dim_z]
         im_codes = th.stack(self.im_encoder(im), dim=1)
+
+        # [B * Number of Layers (NL) * LZ * LZ, 1]
         probs = self.probs(im_codes.flatten(0, 3))
+
         if self.straight_through_probs:
             probs = probs.round() - probs.detach() + probs
 
         logits = (self.project(im_codes) @ dict_codes.transpose(0, 1)) \
-            / np.sqrt(im_codes.shape[-1])
+                 / np.sqrt(im_codes.shape[-1])
+        # [B, NL, LZ, LZ, Dict Size (DS)]
         weights = F.softmax(logits, dim=-1)
 
+        # [B, NL, LZ, LZ, RGBA, PS * 2, PS * 2]
         patches = (weights[..., None, None, None] * learned_dict).sum(4)
+
+        # [B * NL * LZ * LZ, RGBA, PS * 2, PS * 2]
         patches = patches.flatten(0, 3)
 
-        im_patches = F.pad(im, (self.patch_size // 2,)*4)
+        # [B, C, 144, 144]
+        im_patches = F.pad(im, (self.patch_size // 2,) * 4)
+
+        # [B, C, LZ, LZ, 32 (PS * 2), PS * 2]
         im_patches = im_patches.unfold(
             2, self.patch_size * 2, self.patch_size) \
             .unfold(3, self.patch_size * 2, self.patch_size)
+
+        # [B, LZ, LZ, C, PS * 2, PS * 2]
         im_patches = im_patches.reshape(bs, 3, self.layer_size,
-                                        self.layer_size, 2*self.patch_size,
-                                        2*self.patch_size) \
+                                        self.layer_size, 2 * self.patch_size,
+                                        2 * self.patch_size) \
             .permute(0, 2, 3, 1, 4, 5).contiguous()
+
+        # [B * LZ * LZ * NL, C, PS * 2, PS * 2]
         im_patches = im_patches[:, None].repeat(1,
                                                 self.num_layers,
                                                 1, 1, 1, 1, 1).flatten(0, 3)
 
+        # [B * LZ * LZ * NL, z_dim]
         codes_xform = self.encoder_xform(
             th.cat([im_patches, patches], dim=1))[0].squeeze(-2).squeeze(-2)
+        # [B * NL * LZ * LZ, 2]
+        shifts = self.shifts(codes_xform) / 2
 
         if hard:
             weights = th.eye(
@@ -268,6 +293,7 @@ class Model(nn.Module):
             patches = (weights[..., None, None, None] * learned_dict).sum(4)
             patches = patches.flatten(0, 3)
 
+        # [B * NL * LZ * LZ, RGBA, PS * 2, PS * 2] Selected by z_pres
         patches = patches * probs[:, :, None, None]
 
         if self.no_spatial_transformer:
@@ -280,17 +306,20 @@ class Model(nn.Module):
                 xforms_y = th.eye(
                     xforms_y.shape[-1]).to(xforms_y)[xforms_y.argmax(-1)]
 
-            patches = F.pad(patches, (self.patch_size//2,)*4)
+            patches = F.pad(patches, (self.patch_size // 2,) * 4)
             patches = patches.unfold(2, self.patch_size * 2, 1)
             patches = (patches * xforms_y[:, None, :, None, None]).sum(2)
             patches = patches.unfold(2, self.patch_size * 2, 1)
             patches = (patches * xforms_x[:, None, :, None, None]).sum(2)
         else:
-            shifts = self.shifts(codes_xform) / 2
+            # [B * NL * LZ * LZ, 2, 2]
+            # MarioNette does not use scaling, i.e. Matrix is [I, shift_vector]
             theta = th.eye(2)[None].repeat(shifts.shape[0], 1, 1).to(shifts)
+            # [B * NL * LZ * LZ, 2, 3]
             theta = th.cat([theta, -shifts[:, :, None]], dim=-1)
+            # Accordingly, the computed shifts are the anchors around which square patches are selected
             grid = F.affine_grid(theta, [patches.shape[0], 1,
-                                         self.patch_size*2, self.patch_size*2],
+                                         self.patch_size * 2, self.patch_size * 2],
                                  align_corners=False)
 
             patches_rgb, patches_a = th.split(patches, [3, 1], dim=1)
@@ -298,44 +327,53 @@ class Model(nn.Module):
                                         padding_mode='border', mode='bilinear')
             patches_a = F.grid_sample(patches_a, grid, align_corners=False,
                                       padding_mode='zeros', mode='bilinear')
+
             patches = th.cat([patches_rgb, patches_a], dim=1)
 
+
+        # [B, NL, RGBA, LZ, PS * 2, LZ, PS * 2]
         patches = patches.view(
             bs, self.num_layers, self.layer_size, self.layer_size, -1,
-            2*self.patch_size, 2*self.patch_size
+            2 * self.patch_size, 2 * self.patch_size
         ).permute(0, 1, 4, 2, 5, 3, 6)
-
+        # [B, NL, RGBA, LZ / 2, PS, LZ / 2, PS]
         group1 = patches[..., ::2, :, ::2, :].contiguous()
+        # [B, NL, RGBA, W, H]
         group1 = group1.view(bs, self.num_layers, -1,
                              self.canvas_size, self.canvas_size)
-        group1 = group1[..., self.patch_size//2:, self.patch_size//2:]
+        # [B, NL, RGBA, W - 8, H - 8]
+        group1 = group1[..., self.patch_size // 2:, self.patch_size // 2:]
+        # [B, NL, RGBA, W, H]
         group1 = F.pad(group1,
-                       (0, self.patch_size//2, 0, self.patch_size//2))
+                       (0, self.patch_size // 2, 0, self.patch_size // 2))
+
 
         group2 = patches[..., 1::2, :, 1::2, :].contiguous()
         group2 = group2.view(bs, self.num_layers, -1,
                              self.canvas_size, self.canvas_size)
-        group2 = group2[..., :-self.patch_size//2, :-self.patch_size//2]
+        group2 = group2[..., :-self.patch_size // 2, :-self.patch_size // 2]
         group2 = F.pad(group2,
-                       (self.patch_size//2, 0, self.patch_size//2, 0))
+                       (self.patch_size // 2, 0, self.patch_size // 2, 0))
 
         group3 = patches[..., 1::2, :, ::2, :].contiguous()
         group3 = group3.view(bs, self.num_layers, -1,
                              self.canvas_size, self.canvas_size)
-        group3 = group3[..., :-self.patch_size//2, self.patch_size//2:]
+        group3 = group3[..., :-self.patch_size // 2, self.patch_size // 2:]
         group3 = F.pad(group3,
-                       (0, self.patch_size//2, self.patch_size//2, 0))
+                       (0, self.patch_size // 2, self.patch_size // 2, 0))
 
         group4 = patches[..., ::2, :, 1::2, :].contiguous()
         group4 = group4.view(bs, self.num_layers, -1,
                              self.canvas_size, self.canvas_size)
-        group4 = group4[..., self.patch_size//2:, :-self.patch_size//2]
+        group4 = group4[..., self.patch_size // 2:, :-self.patch_size // 2]
         group4 = F.pad(group4,
-                       (self.patch_size//2, 0, 0, self.patch_size//2))
+                       (self.patch_size // 2, 0, 0, self.patch_size // 2))
 
+        # [B, NL, Groups, RGBA, W, H]
         layers = th.stack([group1, group2, group3, group4], dim=2)
         layers_out = layers.clone()
 
+        # [B, NL * Groups, RGBA, W, H]
         if self.shuffle_all:
             layers = layers.flatten(1, 2)[:, th.randperm(4 * self.num_layers)]
         else:
@@ -348,10 +386,10 @@ class Model(nn.Module):
                 bgs = bg.squeeze(0).unfold(2, self.canvas_size, 1)
                 out = (bgs[None] * bg_x[:, None, None, :, None]).sum(3)
             else:
-                shift = self.bg_shift(bg_codes) * 3/4
+                shift = self.bg_shift(bg_codes) * 3 / 4
                 shift = th.cat([shift, th.zeros_like(shift)], dim=-1)
                 theta = th.eye(2)[None].repeat(shift.shape[0], 1, 1).to(shift)
-                theta[:, 0, 0] = 1/4
+                theta[:, 0, 0] = 1 / 4
                 theta = th.cat([theta, -shift[:, :, None]], dim=-1)
                 grid = F.affine_grid(theta, [bs, 1, self.canvas_size,
                                              self.canvas_size],
@@ -364,17 +402,19 @@ class Model(nn.Module):
         else:
             if custom_bg is not None:
                 out = custom_bg[None, :, None, None].clamp(0, 1).repeat(
-                    bs, 1, self.canvas_size, self.canvas_size)                
+                    bs, 1, self.canvas_size, self.canvas_size)
             else:
                 out = self.bg_color[None, :, None, None].clamp(0, 1).repeat(
                     bs, 1, self.canvas_size, self.canvas_size)
             bg = self.bg_color[None, :, None, None].clamp(0, 1).repeat(
                 1, 1, self.canvas_size, self.canvas_size)
 
+        # [Duh...]
         rgb, a = th.split(layers, [3, 1], dim=2)
 
+        # Stack by alpha channel
         for i in range(4 * self.num_layers):
-            out = (1-a[:, i])*out + a[:, i]*rgb[:, i]
+            out = (1 - a[:, i]) * out + a[:, i] * rgb[:, i]
 
         ret = {
             "weights": weights,
@@ -385,10 +425,8 @@ class Model(nn.Module):
             "im_codes": im_codes.flatten(0, 1),
             "reconstruction": out,
             "dict": learned_dict,
-            "background": bg
+            "background": bg,
+            "shifts": shifts,
         }
-
-        if not self.no_spatial_transformer:
-            ret['shifts'] = shifts
 
         return ret
