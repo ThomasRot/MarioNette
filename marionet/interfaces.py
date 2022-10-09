@@ -2,15 +2,18 @@
 import torch as th
 from torch.distributions import Beta
 from torch.nn import functional as F
+import torch.nn as nn
 import ttools
 from ttools.modules import image_operators as imops
+from .classify_z_what import evaluate_z_what
+from collections import Counter
 
 LOG = ttools.get_logger(__name__)
 
 
 class Interface(ttools.ModelInterface):
     def __init__(self, model, device="cpu", lr=1e-4, w_beta=0, w_probs=0,
-                 lr_bg=None, background=None):
+                 lr_bg=None, background=None, aow=0.0):
         self.model = model
 
         if lr_bg is None:
@@ -30,11 +33,16 @@ class Interface(ttools.ModelInterface):
 
         self.w_beta = w_beta
         self.w_probs = w_probs
+        self.aow = aow
 
         self.beta = Beta(th.tensor(2.).to(device), th.tensor(2.).to(device))
 
         self.loss = th.nn.MSELoss()
         self.loss.to(device)
+
+        self.encoding_metrics = Counter()
+        self.counter = 0
+
 
     def forward(self, im, hard=False):
         if self.background is not None:
@@ -42,6 +50,7 @@ class Interface(ttools.ModelInterface):
         else:
             bg = None
         return self.model(im, bg, hard=hard)
+
 
     def training_step(self, batch):
         im = batch["im"].to(self.device)
@@ -75,19 +84,25 @@ class Interface(ttools.ModelInterface):
             probs.clamp(1e-5, 1 - 1e-5)).exp().mean()) / 2
 
         probs_loss = probs.abs()
-        object_consistency_loss = self.object_consistency(im_codes.reshape(B * NL, LZ, LZ, dim_z),
-                                                          probs.reshape(B * NL, LZ, LZ),
-                                                          shifts.reshape(B * NL, LZ, LZ, 2))
+        object_consistency_loss, object_count = self.object_consistency(im_codes.reshape(B, NL, LZ, LZ, dim_z),
+                                                                        probs.reshape(B, NL, LZ, LZ),
+                                                                        shifts.reshape(B, NL, LZ, LZ, 2))
+
         self.opt.zero_grad()
         if self.opt_bg is not None:
             self.opt_bg.zero_grad()
 
         w_probs = th.tensor(self.w_probs).to(probs_loss)[None, :, None] \
             .expand_as(probs_loss)
+
         loss = rec_loss + self.w_beta * beta_loss + \
-               (w_probs * probs_loss).mean() + object_consistency_loss
+               (w_probs * probs_loss).mean() + self.aow * object_consistency_loss
 
         # print(f'{learned_dict.shape=}, {dict_codes.shape=}, {im_codes.shape=}, {weights.shape=}, {probs.shape=}')
+        print(f"{self.counter=}")
+        if self.counter % 500 == 5:
+            self.encoding_metrics = evaluate_z_what(self, batch["fname"][0])
+        self.counter += 1
 
         loss.backward()
 
@@ -101,6 +116,12 @@ class Interface(ttools.ModelInterface):
 
         return {
             "rec_loss": rec_loss.item(),
+            "adjusted_mutual_info_score": self.encoding_metrics["adjusted_mutual_info_score"],
+            "adjusted_rand_score": self.encoding_metrics["adjusted_rand_score"],
+            "few_shot_accuracy_1": self.encoding_metrics["few_shot_accuracy_with_1"],
+            "few_shot_accuracy_4": self.encoding_metrics["few_shot_accuracy_with_4"],
+            "few_shot_accuracy_16": self.encoding_metrics["few_shot_accuracy_with_16"],
+            "few_shot_accuracy_64": self.encoding_metrics["few_shot_accuracy_with_64"],
             "beta_loss": beta_loss.item(),
             "psnr": psnr.item(),
             "psnr_hard": psnr_hard.item(),
@@ -116,21 +137,22 @@ class Interface(ttools.ModelInterface):
         }
 
     def object_consistency(self, what, pres, shift, T=4):
+        cos = nn.CosineSimilarity(dim=1)
         BT, NL, LZ, LZ, z_dim = what.shape
-        z_whats = what.reshape(-1, T, NL, LZ, LZ, z_dim).transpose(0, 1).reshape(-1, T, LZ, LZ, z_dim)
-        B = what.shape[0]
-        z_where = shift.reshape(B, T, NL, LZ, LZ, 2).transpose(0, 1).reshape(T, B * NL, LZ, LZ, 2)
-        z_pres = pres.reshape(B, T, NL, LZ, LZ).transpose(0, 1).reshape(T, B * NL, LZ, LZ)
+        z_whats = what.reshape(-1, T, NL, LZ, LZ, z_dim).transpose(0, 1).reshape(T, -1, LZ, LZ, z_dim)
+        B = z_whats.shape[1] // NL
+        z_where = shift.reshape(-1, T, NL, LZ, LZ, 2).transpose(0, 1).reshape(T, B * NL, LZ, LZ, 2)
+        z_pres = pres.reshape(-1, T, NL, LZ, LZ).transpose(0, 1).reshape(T, B * NL, LZ, LZ)
         z_pres_idx = (z_pres[:-1] > 0.5).nonzero(as_tuple=False)
 
-        # (T, B*NZ, G+2, G+2)
-        z_pres_same_padding = torch.nn.functional.pad(z_pres, (1, 1, 1, 1), mode='replicate')
-        # (T, B*NZ, G+2, G+2, D)
-        z_what_same_padding = torch.nn.functional.pad(z_whats, (0, 0, 1, 1, 1, 1), mode='replicate')
-        # (T, B*NZ, G+2, G+2, 2)
-        z_where_same_padding = torch.nn.functional.pad(z_where, (0, 0, 1, 1, 1, 1), mode='replicate')
+        # (T, B*NL, G+2, G+2)
+        z_pres_same_padding = th.nn.functional.pad(z_pres, (1, 1, 1, 1), mode='replicate')
+        # (T, B*NL, G+2, G+2, D)
+        z_what_same_padding = th.nn.functional.pad(z_whats, (0, 0, 1, 1, 1, 1), mode='replicate')
+        # (T, B*NL, G+2, G+2, 2)
+        z_where_same_padding = th.nn.functional.pad(z_where, (0, 0, 1, 1, 1, 1), mode='replicate')
         # idx: (4,)
-        object_consistency_loss = torch.tensor(0.0).to(z_whats.device)
+        object_consistency_loss = th.tensor(0.0).to(z_whats.device)
         for idx in z_pres_idx:
             # (3, 3)
             z_pres_area = z_pres_same_padding[idx[0] + 1, idx[1], idx[2]:idx[2] + 3, idx[3]:idx[3] + 3]
@@ -139,11 +161,12 @@ class Interface(ttools.ModelInterface):
             # (3, 3, 4)
             z_where_area = z_where_same_padding[idx[0] + 1, idx[1], idx[2]:idx[2] + 3, idx[3]:idx[3] + 3]
             # Tuple((#hits,) (#hits,))
-            z_what_idx = (z_pres_area > arch.object_threshold).nonzero(as_tuple=True)
+            z_what_idx = (z_pres_area > 0.5).nonzero(as_tuple=True)
             # (1, D)
-            z_what_prior = z_whats[idx.tensor_split(4)]
+            idx_split = tuple(it.item() for it in idx)
+            z_what_prior = z_whats[idx_split].unsqueeze(0)
             # (1, 4)
-            z_where_prior = z_where[idx.tensor_split(4)]
+            z_where_prior = z_where[idx_split]
             # (#hits, D)
             z_whats_now = z_what_area[z_what_idx]
             # (#hits, 4)
@@ -158,7 +181,7 @@ class Interface(ttools.ModelInterface):
                                                      reduction='none').sum(dim=-1).argmin()
                 if pos_dif_min != similarity_max_idx:
                     continue
-                object_consistency_loss += -5.0 * z_sim[similarity_max_idx] + torch.sum(z_sim)
+                object_consistency_loss += -5.0 * z_sim[similarity_max_idx] + th.sum(z_sim)
             else:
-                object_consistency_loss += -5.0 * torch.max(z_sim) + torch.sum(z_sim)
-        return object_consistency_loss, torch.tensor(len(z_pres_idx)).to(z_whats.device)
+                object_consistency_loss += -5.0 * th.max(z_sim) + th.sum(z_sim)
+        return object_consistency_loss, th.tensor(len(z_pres_idx)).to(z_whats.device)

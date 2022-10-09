@@ -60,7 +60,7 @@ class DictCallback(cb.TensorBoardImageDisplayCallback):
         color = dictionary[:, :-1]
         alpha = dictionary[:, -1:]
 
-        # Checkerboard background for tranparency
+        # Checkerboard background for transparency
         psz = dictionary.shape[-1]
         bg = th.ones(1, 3, psz // 8, 8, psz // 8, 8)
         bg[:, :, ::2, :, ::2] = 0.8
@@ -90,6 +90,16 @@ class RTPTCallback(cb.Callback):
         Hook to execute code when a new epoch starts.
         """
         self.rtpt.step()
+
+
+class PostEvalCallback(cb.Callback):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+
+    def validation_end(self, val_data):
+        """Hook to execute code when a validation run ends."""
+        print("PostEvalCallback:", val_data)
 
 
 

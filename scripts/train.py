@@ -47,7 +47,7 @@ def main(args):
     else:
         bg_color = None
         background = models.Dictionary(1,
-                                       (args.canvas_size, args.canvas_size*4),
+                                       (args.canvas_size, args.canvas_size * 4),
                                        3, bottleneck_size=4,
                                        no_layernorm=args.no_layernorm)
         background.to(device)
@@ -61,8 +61,8 @@ def main(args):
     _set_seed(args.seed)
 
     learned_dict = models.Dictionary(args.num_classes,
-                                     (args.canvas_size // args.layer_size*2,
-                                      args.canvas_size // args.layer_size*2),
+                                     (args.canvas_size // args.layer_size * 2,
+                                      args.canvas_size // args.layer_size * 2),
                                      4, bottleneck_size=args.dim_z)
     learned_dict.to(device)
 
@@ -75,7 +75,7 @@ def main(args):
                          straight_through_probs=args.straight_through_probs)
 
     interface = Interface(model, device=device, lr=args.lr, w_beta=args.w_beta,
-                          w_probs=args.w_probs, lr_bg=args.lr_bg,
+                          w_probs=args.w_probs, lr_bg=args.lr_bg, aow=args.aow,
                           background=background)
 
     model_checkpointer = ttools.Checkpointer(
@@ -107,7 +107,8 @@ def main(args):
     LOG.info(f'We are scheduled for {num_epochs} epochs...')
     trainer.add_callback(callbacks.RTPTCallback(rtpt=rtpt))
 
-    keys = ["rec_loss", "psnr", "beta_loss", "probs_loss", "psnr_hard"]
+    keys = ["rec_loss", "psnr", "beta_loss", "probs_loss", "psnr_hard", "adjusted_mutual_info_score",
+            "few_shot_accuracy_1", "few_shot_accuracy_4", "few_shot_accuracy_16", "few_shot_accuracy_64"]
     trainer.add_callback(ttools.callbacks.ProgressBarCallback(keys=keys))
     trainer.add_callback(ttools.callbacks.TensorBoardLoggingCallback(
         keys=keys, writer=writer, val_writer=None, frequency=100))
@@ -127,6 +128,8 @@ def main(args):
         writer=writer, val_writer=None, frequency=2000))
     trainer.add_callback(callbacks.BackgroundCallback(
         writer=writer, val_writer=None, frequency=2000))
+
+    trainer.add_callback(callbacks.PostEvalCallback())
 
     trainer.train(dataloader,
                   num_epochs=num_epochs,

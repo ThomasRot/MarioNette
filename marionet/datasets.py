@@ -20,7 +20,6 @@ class AnimationDataset(th.utils.data.Dataset):
             self.files,
             key=lambda f: int(''.join(x for x in os.path.basename(f)
                                       if x.isdigit())))
-
         colors = []
         for f in np.random.choice(self.files, size=min(len(self.files), 100),
                                   replace=False):
@@ -35,6 +34,9 @@ class AnimationDataset(th.utils.data.Dataset):
         vecs, _ = scipy.cluster.vq.vq(colors, codes)
         counts, _ = scipy.histogram(vecs, len(codes))
         self.bg = codes[scipy.argmax(counts)].astype(np.float32) / 255
+        self.T = 4
+        self.current_stack_idx = 0
+        self.current_main_idx = 0
 
     def __repr__(self):
         return "AnimationDataset | {} entries".format(len(self))
@@ -42,7 +44,16 @@ class AnimationDataset(th.utils.data.Dataset):
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, input_idx):
+        input_idx = input_idx // 4 * 4
+        if self.current_stack_idx == self.T:
+            self.current_stack_idx = 0
+        if self.current_stack_idx:
+            idx = self.current_main_idx + self.current_stack_idx
+        else:
+            self.current_main_idx = input_idx
+            idx = self.current_main_idx
+        self.current_stack_idx += 1
         im = Image.open(self.files[idx]).convert('RGB')
         w, h = im.size
         a = min(w, h) / self.canvas_size
