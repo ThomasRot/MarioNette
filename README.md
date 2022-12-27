@@ -2,6 +2,10 @@
 
 <img src="https://people.csail.mit.edu/smirnov/marionette/im.png" width="75%" alt="MarioNette" />
 
+# For the modifications targeting integrating time-consistency check out the other branch.
+
+`time-consistency` then also contains some light documentation.
+
 **MarioNette: Self-Supervised Sprite Learning**<br>
 Dmitriy Smirnov, Michaël Gharbi, Matthew Fisher, Vitor Guizilini, Alexei A. Efros, Justin Solomon<br>
 [NeurIPS 2021](https://neurips.cc/Conferences/2021)
